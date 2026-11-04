@@ -45,7 +45,7 @@ class SessionViewModel: ObservableObject {
     @Published var frameSourceStatus: FrameSourceStatus = .disconnected
     @Published var rayBanFrame: UIImage?
 
-    // Mode system
+    // Mode system (modes are disabled; kept so the views still compile)
     @Published var modeManager = ModeManager()
 
     // QR/Barcode toast
@@ -273,6 +273,7 @@ class SessionViewModel: ObservableObject {
         speechManager.stopSpeaking()
         print("[Session] Speaking interrupted by user — resuming listening")
         if handsFree {
+            handsFreeListener.openFollowUp(seconds: 8)
             state = .idle
             return
         }
@@ -326,6 +327,14 @@ class SessionViewModel: ObservableObject {
                 await self.sendText(text)
             }
         }
+        // Show what hands-free is hearing in the live transcription banner
+        handsFreeListener.$heardText
+            .receive(on: RunLoop.main)
+            .sink { [weak self] text in
+                self?.currentTranscription = text
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest3($state, $isConnected, $handsFree)
             .receive(on: RunLoop.main)
             .sink { [weak self] state, connected, enabled in
@@ -358,9 +367,8 @@ class SessionViewModel: ObservableObject {
         state = .thinking
         errorMessage = nil
 
-        // Prepend mode system prompt as context
-        let modeContext = modeManager.activeMode.systemPrompt
-        let fullText = "[Mode: \(modeManager.activeMode.name)] \(modeContext)\n\nUser: \(text)"
+        // Modes are disabled: send exactly what was said (your CLAUDE.md sets how Claude behaves)
+        let fullText = text
 
         // Grab latest frame
         var image: Data?
@@ -389,7 +397,7 @@ class SessionViewModel: ObservableObject {
                 // Small images or text-only: send via WebSocket
                 bridge.sendMessage(text: fullText, image: image, source: source)
             }
-            print("[Session] Sent to channel: \"\(text)\" with \(image != nil ? "image" : "no image") [mode: \(modeManager.activeMode.name)]")
+            print("[Session] Sent to channel: \"\(text)\" with \(image != nil ? "image" : "no image")")
             // Reply comes back via onReply callback — don't set isProcessing = false here
 
         } else {
@@ -424,7 +432,8 @@ class SessionViewModel: ObservableObject {
     private func finishSpeaking() {
         guard isConnected, state == .speaking else { return }
         if handsFree {
-            state = .idle          // back to waiting for "hey claude"
+            handsFreeListener.openFollowUp(seconds: 8)   // talk again without "hey claude"
+            state = .idle
         } else {
             startListening()
         }

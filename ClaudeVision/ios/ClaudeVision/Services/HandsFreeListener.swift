@@ -20,11 +20,16 @@ final class HandsFreeAudioFeed: @unchecked Sendable {
 /// Always-on, hands-free listener: waits for "hey claude" (or "claude ..."), then captures what
 /// you say until you pause and hands it to `onCommand`. The audio engine stays running while
 /// paused so iOS never has to restart the mic from the background.
+///
+/// After Claude finishes speaking there is a short follow-up window where you can just talk
+/// without saying the wake phrase again.
 @MainActor
 final class HandsFreeListener: NSObject, ObservableObject {
     enum Phase { case stopped, paused, waiting, capturing }
 
     @Published private(set) var phase: Phase = .stopped
+    /// What the recognizer currently hears (shown on screen so you can see it working).
+    @Published private(set) var heardText: String = ""
     var onCommand: ((String) -> Void)?
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -41,12 +46,19 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private var restartToken = 0
     private var errorStreak = 0
     private var capturedCommand = ""
+    private var followUpUntil = Date.distantPast
 
     private let pauseThreshold: TimeInterval = 1.6
     private let wakePhrases = ["hey claude", "okay claude", "ok claude", "hi claude",
-                               "hey cloud", "hey clod", "hey claud", "hey clawed", "hey claudia"]
+                               "hey cloud", "hey clod", "hey claud", "hey clawed", "hey claudia",
+                               "hey clyde", "a claude", "hey cod", "hey clock"]
 
     // MARK: - Control
+
+    /// After Claude finishes speaking, accept the next thing you say without the wake phrase.
+    func openFollowUp(seconds: TimeInterval = 8) {
+        followUpUntil = Date().addingTimeInterval(seconds)
+    }
 
     /// Start (or resume) listening for the wake phrase.
     func setActive(_ active: Bool) {
@@ -65,6 +77,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
             return
         default:
             print("[HandsFree] speech recognition not authorized")
+            heardText = "Speech recognition not allowed - enable it in iPhone Settings"
             return
         }
 
@@ -86,6 +99,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         phase = .paused
         invalidateTimers()
         endRecognition()
+        heardText = ""
     }
 
     /// Full teardown (mic off).
@@ -95,6 +109,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         invalidateTimers()
         endRecognition()
         stopEngine()
+        heardText = ""
     }
 
     // MARK: - Engine
@@ -171,6 +186,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private func beginRecognition() {
         guard phase == .waiting || phase == .capturing else { return }
         endRecognition()
+        heardText = ""
         guard let recognizer, recognizer.isAvailable else {
             scheduleRestart(after: 2.0)
             return
@@ -232,16 +248,20 @@ final class HandsFreeListener: NSObject, ObservableObject {
         guard let text else { return }
         errorStreak = 0
         let norm = HandsFreeListener.normalize(text)
+        if phase == .waiting || phase == .capturing { heardText = text }
 
         switch phase {
         case .waiting:
             if let rest = commandAfterWake(norm) {
                 enterCapturing(initial: rest)
+            } else if Date() < followUpUntil && !norm.isEmpty {
+                // Follow-up window after Claude spoke: no wake phrase needed.
+                enterCapturing(initial: norm)
             } else if isFinal {
                 beginRecognition()
             }
         case .capturing:
-            capturedCommand = commandAfterWake(norm) ?? ""
+            capturedCommand = commandAfterWake(norm) ?? norm
             if !capturedCommand.isEmpty { resetSilenceTimer() }
             if isFinal { finishCommand() }
         default:
@@ -253,6 +273,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
 
     private func enterCapturing(initial: String) {
         phase = .capturing
+        followUpUntil = .distantPast
         capturedCommand = initial
         AudioServicesPlaySystemSound(1113)   // short "I heard you" cue
         print("[HandsFree] wake phrase heard")
