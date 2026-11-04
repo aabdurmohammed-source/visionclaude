@@ -132,7 +132,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
         do {
             session = try wearables.createSession(deviceSelector: selector)
         } catch {
-            connectionStatus = .error("Session error: \(error.localizedDescription)")
+            connectionStatus = .error("Session error: \(error.localizedDescription) | \(deviceDiagnostics())")
             print("[RayBan] createSession failed: \(error)")
             return
         }
@@ -156,7 +156,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
         sessionErrorToken = session.errorPublisher.listen { [weak self] (error: DeviceSessionError) in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let msg = "Session: \(error.errorDescription ?? "\(error)")"
+                let msg = "Session: \(error.errorDescription ?? "\(error)") | \(self.deviceDiagnostics())"
                 print("[RayBan] \(msg)")
                 self.connectionStatus = .error(msg)
             }
@@ -202,9 +202,20 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
                 print("[RayBan] Session start() returned, state: \(session.state)")
             } catch {
                 print("[RayBan] Session start failed: \(error)")
-                self.connectionStatus = .error("Start failed: \(error.localizedDescription)")
+                self.connectionStatus = .error("Start failed: \(error.localizedDescription) | \(self.deviceDiagnostics())")
             }
         }
+    }
+
+    private func deviceDiagnostics() -> String {
+        let wearables = Wearables.shared
+        let ids = wearables.devices
+        if ids.isEmpty { return "SDK sees 0 devices (reg: \(wearables.registrationState))" }
+        let parts: [String] = ids.map { id in
+            guard let d = wearables.deviceForIdentifier(id) else { return "\(id): unknown" }
+            return "\(d.name) link=\(d.linkState) compat=\(d.compatibility()) worn=\(d.donState) hinge=\(d.hingeState) batt=\(d.batteryLevel.map(String.init) ?? "?")"
+        }
+        return "devices(\(ids.count)): " + parts.joined(separator: "; ")
     }
 
     private func attachCameraAndStream(to session: DeviceSession) {
