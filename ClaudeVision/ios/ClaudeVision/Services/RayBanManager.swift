@@ -24,6 +24,12 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
     @Published var registrationState: String = "unregistered"
     @Published var isRegistered: Bool = false
 
+    /// On-demand camera: the glasses camera only streams while a frame is being grabbed
+    /// (a second or two per question) instead of all the time. Saves a lot of battery and heat.
+    var onDemandCamera: Bool = (UserDefaults.standard.object(forKey: "onDemandCamera") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(onDemandCamera, forKey: "onDemandCamera") }
+    }
+
     // DAT SDK
     private var deviceSession: DeviceSession?
     private var camera: Camera?
@@ -169,7 +175,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
             }
         }
 
-        // When the device session is started, attach camera + stream
+        // When the device session is started, attach camera (+ stream, unless on-demand)
         sessionStateToken = session.statePublisher.listen { [weak self] (state: DeviceSessionState) in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -209,7 +215,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
                 print("[RayBan] Session start() returned, state: \(session.state)")
             } catch {
                 print("[RayBan] Session start failed: \(error)")
-                self.connectionStatus = .error("Start failed: \(error.localizedDescription) | \(self.deviceDiagnostics())")
+                self.connectionStatus = .error("Start failed: \(error.localizedDescription)")
             }
         }
     }
@@ -253,9 +259,10 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
                     self.connectionStatus = .connected
                 case .stopped:
                     self.isRunning = false
-                    self.connectionStatus = .disconnected
+                    // On-demand mode: a stopped stream is normal, the glasses are still ready.
+                    self.connectionStatus = self.onDemandCamera ? .connected : .disconnected
                 default:
-                    self.connectionStatus = .connecting
+                    if !self.onDemandCamera { self.connectionStatus = .connecting }
                 }
             }
         }
@@ -271,7 +278,6 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
                     self.lastCaptureTime = now
                     if let jpegData = uiImage.jpegData(compressionQuality: self.jpegQuality) {
                         self.latestFrame = jpegData
-                        print("[RayBan] Captured JPEG frame (\(jpegData.count) bytes)")
                     }
                 }
             }
@@ -286,10 +292,17 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
             }
         }
 
-        stream.start()
+        if onDemandCamera {
+            // Session is up and the camera is attached; stay idle until a frame is needed.
+            connectionStatus = .connected
+            print("[RayBan] Camera ready (on-demand, not streaming)")
+        } else {
+            stream.start()
+        }
     }
 
     func stop() {
+        camera?.stream.stop()
         camera?.stop()
         deviceSession?.stop()
         stateToken = nil
@@ -312,6 +325,26 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
 
     func consumeFrame() -> Data? {
         return latestFrame
+    }
+
+    /// Grab one fresh frame. In on-demand mode this briefly starts the stream, waits a moment
+    /// for exposure to settle, takes a frame, and stops the stream again.
+    func captureFrame(timeout: TimeInterval = 5) async -> Data? {
+        guard onDemandCamera, let cam = camera else { return consumeFrame() }
+
+        let startCount = frameCount
+        latestImage = nil
+        cam.stream.start()
+        let deadline = Date().addingTimeInterval(timeout)
+        // ~10 frames in (a third of a second) so auto-exposure has settled
+        while frameCount < startCount + 10 && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let jpeg = latestImage?.jpegData(compressionQuality: jpegQuality)
+        cam.stream.stop()
+        print("[RayBan] On-demand capture: \(jpeg?.count ?? 0) bytes (frames: \(frameCount - startCount))")
+        latestFrame = jpeg
+        return jpeg
     }
 
     func cleanup() {

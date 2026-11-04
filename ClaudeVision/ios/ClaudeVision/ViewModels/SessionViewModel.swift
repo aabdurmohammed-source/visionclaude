@@ -370,7 +370,8 @@ class SessionViewModel: ObservableObject {
             image = cameraManager.consumeFrame()
             source = "iphone"
         case .rayBan:
-            image = rayBanManager.consumeFrame()
+            // On-demand: briefly wakes the glasses camera for one frame, then stops it
+            image = await rayBanManager.captureFrame()
             source = "rayban"
         }
 
