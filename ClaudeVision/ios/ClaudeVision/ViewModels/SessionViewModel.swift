@@ -304,7 +304,7 @@ class SessionViewModel: ObservableObject {
         speechManager.stopSpeaking()
         print("[Session] Speaking interrupted by user — resuming listening")
         if handsFree {
-            handsFreeListener.openFollowUp(seconds: 8)
+            handsFreeListener.openFollowUp(seconds: 5)
             state = .idle
             return
         }
@@ -396,6 +396,19 @@ class SessionViewModel: ObservableObject {
         await handleUserSpeech(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// Only wake the camera when the request is about something visible. Saves seconds per reply
+    /// and glasses battery. Say "look at this" / "what am I holding" etc. to get a photo.
+    static func mentionsCamera(_ text: String) -> Bool {
+        let words = Set(text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init))
+        let triggers: Set<String> = [
+            "look", "looking", "looks", "see", "seeing", "this", "that", "these", "those",
+            "read", "camera", "photo", "picture", "pic", "image", "scan", "identify",
+            "describe", "color", "colour", "sign", "label", "menu", "front", "holding",
+            "wearing", "visible", "glasses", "view"
+        ]
+        return !words.isDisjoint(with: triggers)
+    }
+
     private func handleUserSpeech(_ text: String) async {
         guard !isProcessing else { return }
         isProcessing = true
@@ -408,16 +421,17 @@ class SessionViewModel: ObservableObject {
         // Modes are disabled: send exactly what was said (your CLAUDE.md sets how Claude behaves)
         let fullText = text
 
-        // Grab latest frame
+        // Grab a frame only when the request is about something visible
+        let wantsCamera = SessionViewModel.mentionsCamera(text)
         var image: Data?
         let source: String
         switch activeFrameSource {
         case .iPhone:
-            image = cameraManager.consumeFrame()
+            image = wantsCamera ? cameraManager.consumeFrame() : nil
             source = "iphone"
         case .rayBan:
             // On-demand: briefly wakes the glasses camera for one frame, then stops it
-            image = await rayBanManager.captureFrame()
+            image = wantsCamera ? await rayBanManager.captureFrame() : nil
             source = "rayban"
         }
 
@@ -470,7 +484,7 @@ class SessionViewModel: ObservableObject {
     private func finishSpeaking() {
         guard isConnected, state == .speaking else { return }
         if handsFree {
-            handsFreeListener.openFollowUp(seconds: 8)   // talk again without "hey claude"
+            handsFreeListener.openFollowUp(seconds: 5)   // talk again without "hey claude"; chime if you don't
             state = .idle
         } else {
             startListening()
