@@ -39,7 +39,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private var currentRequest: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var engineRunning = false
-    private var configObserver: NSObject?
+    private var configObserver: NSObjectProtocol?
 
     private var rollTimer: Timer?
     private var silenceTimer: Timer?
@@ -140,7 +140,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in self?.handleConfigChange() }
-            } as? NSObject
+            }
         }
     }
 

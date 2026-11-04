@@ -131,6 +131,7 @@ class SessionViewModel: ObservableObject {
                     self.errorMessage = nil
                     try? AudioSessionManager.shared.configureForVoiceChat()
                     self.startActiveFrameSource()
+                    self.greetIfNeeded()
                 }
             }
         }
@@ -139,6 +140,36 @@ class SessionViewModel: ObservableObject {
             Task { @MainActor in
                 self?.state = .disconnected
             }
+        }
+    }
+
+    // MARK: - Claude speaks first
+
+    /// When the app opens, Claude starts the conversation. Runs at most once every 30 minutes so
+    /// reconnects and quick reopens don't trigger a greeting (or use up Claude messages) each time.
+    private func greetIfNeeded() {
+        guard !isProcessing, state == .idle else { return }
+        let key = "lastGreetingTime"
+        let now = Date().timeIntervalSince1970
+        let last = UserDefaults.standard.double(forKey: key)
+        guard now - last > 30 * 60 else { return }
+        UserDefaults.standard.set(now, forKey: key)
+
+        isProcessing = true
+        state = .thinking
+        bridge.sendMessage(
+            text: "(The app was just opened. Greet me in one short sentence and ask what I need. Do not mention this note.)",
+            image: nil,
+            source: "app"
+        )
+        print("[Session] Asked Claude to greet first")
+
+        // If Claude never answers, don't leave the app stuck on "Thinking"
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            guard let self, self.state == .thinking, self.isProcessing else { return }
+            self.isProcessing = false
+            self.state = .idle
         }
     }
 
