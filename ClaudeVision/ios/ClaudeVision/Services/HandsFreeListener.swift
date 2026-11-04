@@ -47,12 +47,14 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private var restartToken = 0
     private var errorStreak = 0
     private var capturedCommand = ""
+    /// Words from earlier recognizer rounds of the same request (the recognizer finalizes on short pauses).
+    private var committedText = ""
     private var followUpUntil = Date.distantPast
 
     private let armedHint = "Listening for \u{201C}hey claude\u{201D}\u{2026}"
 
-    /// Seconds of silence after you stop talking before the request is sent.
-    private let pauseThreshold: TimeInterval = 1.6
+    /// Seconds of real silence after you stop talking before the request is sent.
+    private let pauseThreshold: TimeInterval = 2.0
     /// Seconds you have to start talking after "hey claude".
     private let awakeWindow: TimeInterval = 5
     private let powerOnSound: SystemSoundID = 1113    // begin-recording tone
@@ -195,7 +197,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
             do {
                 try self.startEngine()
                 if wasListening || self.phase == .waiting || self.phase == .capturing {
-                    self.phase = .waiting
+                    if self.phase != .capturing { self.phase = .waiting }
                     self.beginRecognition()
                 }
             } catch {
@@ -210,7 +212,8 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private func beginRecognition() {
         guard phase == .waiting || phase == .capturing else { return }
         endRecognition()
-        heardText = (phase == .waiting) ? armedHint : ""
+        if phase == .waiting { heardText = armedHint }
+        else if phase == .capturing { heardText = capturedCommand }
         guard let recognizer, recognizer.isAvailable else {
             heardText = "Speech recognizer unavailable - retrying\u{2026}"
             scheduleRestart(after: 2.0)
@@ -262,10 +265,11 @@ final class HandsFreeListener: NSObject, ObservableObject {
 
         if failed {
             errorStreak += 1
-            if phase == .capturing && !capturedCommand.isEmpty {
-                finishCommand()
+            if phase == .capturing {
+                // Keep what was said and keep listening; the silence timer ends the turn.
+                committedText = capturedCommand
+                scheduleRestart(after: min(0.3 * Double(errorStreak), 3.0))
             } else {
-                phase = (phase == .capturing) ? .waiting : phase
                 scheduleRestart(after: min(0.3 * Double(errorStreak), 3.0))
             }
             return
@@ -273,7 +277,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         guard let text else { return }
         errorStreak = 0
         let norm = HandsFreeListener.normalize(text)
-        if (phase == .waiting || phase == .capturing) && !norm.isEmpty { heardText = text }
+        if phase == .waiting && !norm.isEmpty { heardText = text }
 
         switch phase {
         case .waiting:
@@ -286,9 +290,19 @@ final class HandsFreeListener: NSObject, ObservableObject {
                 beginRecognition()
             }
         case .capturing:
-            capturedCommand = commandAfterWake(norm) ?? norm
-            if !capturedCommand.isEmpty { resetSilenceTimer() }
-            if isFinal { finishCommand() }
+            let current = commandAfterWake(norm) ?? norm
+            let combined = [committedText, current].filter { !$0.isEmpty }.joined(separator: " ")
+            if !combined.isEmpty {
+                capturedCommand = combined
+                heardText = combined
+                resetSilenceTimer()
+            }
+            if isFinal {
+                // The recognizer ended this round on a short pause. Don't send yet:
+                // keep the words and start a new round; only real silence ends the turn.
+                committedText = capturedCommand
+                beginRecognition()
+            }
         default:
             break
         }
@@ -301,6 +315,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         followUpUntil = .distantPast
         followUpTimer?.invalidate(); followUpTimer = nil
         capturedCommand = initial
+        committedText = ""
         if playChime { AudioServicesPlaySystemSound(powerOnSound) }   // power-on: you can talk now
         print("[HandsFree] wake phrase heard")
         if !initial.isEmpty { resetSilenceTimer() }
@@ -311,6 +326,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
                 print("[HandsFree] nothing said after wake phrase - going back to waiting")
                 AudioServicesPlaySystemSound(self.powerOffSound)   // power-off: stopped listening
                 self.phase = .waiting
+                self.committedText = ""
                 self.beginRecognition()
             }
         }
@@ -330,6 +346,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         awakeTimer?.invalidate(); awakeTimer = nil
         guard !cmd.isEmpty else { return }
         capturedCommand = ""
+        committedText = ""
         phase = .waiting
         beginRecognition()           // fresh request; the view model pauses us while Claude works
         print("[HandsFree] command: \(cmd)")
@@ -361,6 +378,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         rollTimer?.invalidate(); rollTimer = nil
         restartToken += 1
         capturedCommand = ""
+        committedText = ""
     }
 
     private func scheduleRestart(after delay: TimeInterval, forceActivate: Bool = false) {
