@@ -20,6 +20,11 @@ class SessionViewModel: ObservableObject {
     @Published var isProcessing: Bool = false
     @Published var connectionMode: ClaudeBridge.ConnectionMode = .channel
 
+    /// Hands-free: always listening for "hey claude" instead of tap-to-talk.
+    @Published var handsFree: Bool = (UserDefaults.standard.object(forKey: "handsFree") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(handsFree, forKey: "handsFree") }
+    }
+
     @Published var config: ClaudeConfig {
         didSet {
             bridge.updateConfig(config)
@@ -51,6 +56,7 @@ class SessionViewModel: ObservableObject {
     let speechManager = SpeechManager()
     let cameraManager = CameraManager()
     let rayBanManager = RayBanManager()
+    let handsFreeListener = HandsFreeListener()
     private var cancellables = Set<AnyCancellable>()
 
     init(config: ClaudeConfig = ClaudeConfig.load()) {
@@ -105,8 +111,7 @@ class SessionViewModel: ObservableObject {
                     self.state = .speaking
                     self.speechManager.playRemoteAudio(url: url) { [weak self] in
                         Task { @MainActor in
-                            guard let self, self.isConnected, self.state == .speaking else { return }
-                            self.startListening()
+                            self?.finishSpeaking()
                         }
                     }
                 } else {
@@ -235,7 +240,7 @@ class SessionViewModel: ObservableObject {
                     AudioSessionManager.shared.routeToBluetoothMicIfAvailable()
                 }
             }
-            if isConnected && !speechManager.isListening {
+            if isConnected && !handsFree && !speechManager.isListening {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     self?.startListening()
                 }
@@ -267,6 +272,10 @@ class SessionViewModel: ObservableObject {
     func interruptSpeaking() {
         speechManager.stopSpeaking()
         print("[Session] Speaking interrupted by user — resuming listening")
+        if handsFree {
+            state = .idle
+            return
+        }
         // Brief delay for audio session to settle after stopping playback
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.startListening()
@@ -309,6 +318,20 @@ class SessionViewModel: ObservableObject {
         }
 
         speechManager.setPauseThreshold(config.speechPauseThreshold)
+
+        // Hands-free wake-phrase listener
+        handsFreeListener.onCommand = { [weak self] text in
+            Task { @MainActor in
+                guard let self, self.state == .idle else { return }
+                await self.sendText(text)
+            }
+        }
+        Publishers.CombineLatest3($state, $isConnected, $handsFree)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state, connected, enabled in
+                self?.updateHandsFree(state: state, connected: connected, enabled: enabled)
+            }
+            .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .audioInterruptionBegan)
             .sink { [weak self] _ in
@@ -388,6 +411,24 @@ class SessionViewModel: ObservableObject {
         }
     }
 
+    private func updateHandsFree(state: SessionState, connected: Bool, enabled: Bool) {
+        guard connected, enabled else { handsFreeListener.stop(); return }
+        switch state {
+        case .idle: handsFreeListener.setActive(true)
+        case .thinking, .speaking: handsFreeListener.setActive(false)   // mic stays hot, just paused
+        case .listening, .disconnected: handsFreeListener.stop()
+        }
+    }
+
+    private func finishSpeaking() {
+        guard isConnected, state == .speaking else { return }
+        if handsFree {
+            state = .idle          // back to waiting for "hey claude"
+        } else {
+            startListening()
+        }
+    }
+
     private func observeSpeechCompletion() {
         speechManager.$isSpeaking
             .dropFirst()
@@ -395,8 +436,7 @@ class SessionViewModel: ObservableObject {
             .first()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                guard let self, self.isConnected, self.state == .speaking else { return }
-                self.startListening()
+                self?.finishSpeaking()
             }
             .store(in: &cancellables)
     }
