@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import UIKit
 
 /// Bridges the iOS app to either:
 /// - Channel mode (WebSocket → Claude Code session, uses ALL your MCP tools + skills)
@@ -26,9 +27,12 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     private var config: ClaudeConfig
     private var conversationId: String?
     private var reconnectAttempts = 0
-    private let maxReconnectAttempts = 5
     private var isManualDisconnect = false
     private var pingTimer: Timer?
+    private var reconnectWork: DispatchWorkItem?
+    private var hasConnectedOnce = false
+    private var observersInstalled = false
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     init(config: ClaudeConfig) {
         self.config = config
@@ -41,9 +45,13 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
 
     // MARK: - Channel Mode (WebSocket)
 
-    func connectWebSocket() {
+    func connectWebSocket(resetAttempts: Bool = true) {
         isManualDisconnect = false
-        reconnectAttempts = 0
+        hasConnectedOnce = true
+        if resetAttempts { reconnectAttempts = 0 }
+        reconnectWork?.cancel()
+        reconnectWork = nil
+        tearDownSocket()   // never leave an old socket alive -> no duplicate replies
 
         let wsURL = config.wsURL
         print("[Bridge] Connecting WebSocket to \(wsURL)")
@@ -57,22 +65,35 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         let task = session.webSocketTask(with: request)
         self.webSocket = task
         task.resume()
-        receiveMessage()
+        receiveMessage(on: task)
+        installObserversIfNeeded()
+        BackgroundKeepAlive.shared.start()
     }
 
     func disconnect() {
         isManualDisconnect = true
-        pingTimer?.invalidate()
-        pingTimer = nil
-        webSocket?.cancel(with: .goingAway, reason: nil)
-        webSocket = nil
+        reconnectWork?.cancel()
+        reconnectWork = nil
+        tearDownSocket()
         isConnected = false
+        BackgroundKeepAlive.shared.stop()
         onDisconnect?()
     }
 
-    private func receiveMessage() {
-        webSocket?.receive { [weak self] result in
-            guard let self else { return }
+    private func tearDownSocket() {
+        pingTimer?.invalidate()
+        pingTimer = nil
+        let oldTask = webSocket
+        let oldSession = urlSession
+        webSocket = nil
+        urlSession = nil
+        oldTask?.cancel(with: .goingAway, reason: nil)
+        oldSession?.invalidateAndCancel()
+    }
+
+    private func receiveMessage(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            guard let self, self.webSocket === task else { return }   // ignore stale sockets
             switch result {
             case .success(let message):
                 switch message {
@@ -85,14 +106,50 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
                 @unknown default:
                     break
                 }
-                self.receiveMessage() // Keep listening
+                self.receiveMessage(on: task) // Keep listening
             case .failure(let error):
                 print("[Bridge] WebSocket receive error: \(error)")
                 DispatchQueue.main.async {
+                    guard self.webSocket === task else { return }
                     self.isConnected = false
                     self.attemptReconnect()
                 }
             }
+        }
+    }
+
+    // MARK: - App lifecycle (keep the link alive across lock screen / app switching)
+
+    private func installObserversIfNeeded() {
+        guard !observersInstalled else { return }
+        observersInstalled = true
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            if self.bgTask == .invalid {
+                self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "claude-ws") { [weak self] in
+                    guard let self else { return }
+                    UIApplication.shared.endBackgroundTask(self.bgTask)
+                    self.bgTask = .invalid
+                }
+            }
+        }
+        nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            if self.bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(self.bgTask)
+                self.bgTask = .invalid
+            }
+            self.reconnectIfNeeded()
+        }
+    }
+
+    /// Reconnect right away if the socket died while the app was away.
+    func reconnectIfNeeded() {
+        guard hasConnectedOnce, !isManualDisconnect, mode == .channel else { return }
+        if webSocket == nil || !isConnected {
+            print("[Bridge] App active and not connected - reconnecting")
+            connectWebSocket()
         }
     }
 
@@ -238,16 +295,17 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     // MARK: - Reconnection
 
     private func attemptReconnect() {
-        guard !isManualDisconnect, reconnectAttempts < maxReconnectAttempts else {
-            print("[Bridge] Giving up reconnection after \(reconnectAttempts) attempts")
-            return
-        }
+        guard !isManualDisconnect, reconnectWork == nil else { return }  // only one pending retry
         reconnectAttempts += 1
-        let delay = min(Double(reconnectAttempts) * 2.0, 10.0)
+        let delay = min(Double(reconnectAttempts) * 2.0, 15.0)
         print("[Bridge] Reconnecting in \(delay)s (attempt \(reconnectAttempts))")
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.connectWebSocket()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.reconnectWork = nil
+            self.connectWebSocket(resetAttempts: false)
         }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func startPingTimer() {
@@ -270,8 +328,9 @@ class ClaudeBridge: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         print("[Bridge] WebSocket closed: \(closeCode)")
         DispatchQueue.main.async { [weak self] in
-            self?.isConnected = false
-            self?.attemptReconnect()
+            guard let self, self.webSocket === webSocketTask else { return }   // stale socket
+            self.isConnected = false
+            self.attemptReconnect()
         }
     }
 
