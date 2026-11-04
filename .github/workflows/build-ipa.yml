@@ -6,9 +6,16 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26   # VisionClaude's project.yml asks for Xcode 26; change to macos-15 if the runner image is missing
+    runs-on: macos-15   # macos-26 runners are scarce and jobs time out in the queue; macos-15 gets a runner fast
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$X" ]; then sudo xcode-select -s "$X/Contents/Developer"; fi
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
