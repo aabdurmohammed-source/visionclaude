@@ -81,7 +81,7 @@
 		<key>MetaAppID</key>
 		<string>0</string>
 		<key>TeamID</key>
-		<string>$(DEVELOPMENT_TEAM)</string>
+		<string>FFDSBA6YMV</string>
 		<key>Analytics</key>
 		<dict>
 			<key>OptOut</key>
