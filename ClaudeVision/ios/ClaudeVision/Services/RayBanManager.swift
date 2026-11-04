@@ -29,7 +29,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
     private var camera: Camera?
     private var sessionStateToken: AnyListenerToken?
     private var sessionErrorToken: AnyListenerToken?
-    private var deviceSelector: AutoDeviceSelector?
+    private var deviceSelector: (any DeviceSelector)?
     private var stateToken: AnyListenerToken?
     private var frameToken: AnyListenerToken?
     private var errorToken: AnyListenerToken?
@@ -125,7 +125,14 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
         print("[RayBan] Starting device session...")
 
         let wearables = Wearables.shared
-        let selector = AutoDeviceSelector(wearables: wearables)
+        // Pick the known glasses directly: AutoDeviceSelector resolves asynchronously,
+        // so createSession right after init failed with noEligibleDevice.
+        let selector: any DeviceSelector
+        if let first = wearables.devices.first {
+            selector = SpecificDeviceSelector(device: first)
+        } else {
+            selector = AutoDeviceSelector(wearables: wearables)
+        }
         self.deviceSelector = selector
 
         let session: DeviceSession
@@ -215,7 +222,7 @@ class RayBanManager: NSObject, ObservableObject, FrameSource {
             guard let d = wearables.deviceForIdentifier(id) else { return "\(id): unknown" }
             return "\(d.name) link=\(d.linkState) compat=\(d.compatibility()) worn=\(d.donState) hinge=\(d.hingeState) batt=\(d.batteryLevel.map(String.init) ?? "?")"
         }
-        return "devices(\(ids.count)): " + parts.joined(separator: "; ")
+        return "devices(\(ids.count)): " + parts.joined(separator: "; ") + " selActive=\(deviceSelector?.activeDevice != nil)"
     }
 
     private func attachCameraAndStream(to session: DeviceSession) {
