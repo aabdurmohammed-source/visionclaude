@@ -318,6 +318,13 @@ class SessionViewModel: ObservableObject {
             }
         }
 
+        // Show audio playback failures on screen instead of failing silently
+        speechManager.onPlaybackError = { [weak self] message in
+            Task { @MainActor in
+                self?.errorMessage = "Audio: \(message)"
+            }
+        }
+
         speechManager.setPauseThreshold(config.speechPauseThreshold)
 
         // Hands-free wake-phrase listener

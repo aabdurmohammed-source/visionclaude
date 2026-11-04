@@ -87,19 +87,30 @@ class AudioDataPlayer: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     private var completion: (() -> Void)?
 
-    func play(data: Data, completion: @escaping () -> Void) {
+    func play(data: Data, onError: ((String) -> Void)? = nil, completion: @escaping () -> Void) {
         self.completion = completion
 
         do {
+            // Stay in the voice chat session. The hands-free mic engine keeps running while
+            // Claude speaks, so switching to .playback here would pull input out from under it.
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
+            if session.category == .playAndRecord {
+                try session.setActive(true)
+            } else {
+                try AudioSessionManager.shared.configureForVoiceChat()
+            }
 
-            player = try AVAudioPlayer(data: data)
-            player?.delegate = self
-            player?.play()
+            let newPlayer = try AVAudioPlayer(data: data)
+            newPlayer.delegate = self
+            player = newPlayer
+            guard newPlayer.play() else {
+                throw NSError(domain: "AudioDataPlayer", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback did not start"])
+            }
         } catch {
             print("[AudioPlayer] Error: \(error)")
+            self.completion = nil
+            onError?(error.localizedDescription)
             completion()
         }
     }
@@ -146,6 +157,7 @@ class SpeechManager: NSObject, ObservableObject {
     private var pauseThreshold: TimeInterval = 1.5
     var onSpeechPause: ((String) -> Void)?
     var onSpeechFinished: (() -> Void)?
+    var onPlaybackError: ((String) -> Void)?
 
     override init() {
         super.init()
@@ -303,12 +315,17 @@ class SpeechManager: NSObject, ObservableObject {
                 let (data, response) = try await URLSession.shared.data(from: url)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                     print("[Speech] Remote audio fetch failed")
-                    await MainActor.run { self.isSpeaking = false }
+                    await MainActor.run {
+                        self.isSpeaking = false
+                        self.onPlaybackError?("download failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))")
+                    }
                     completion()
                     return
                 }
                 print("[Speech] Playing remote audio: \(data.count) bytes from \(url.lastPathComponent)")
-                AudioDataPlayer.shared.play(data: data) { [weak self] in
+                AudioDataPlayer.shared.play(data: data, onError: { [weak self] message in
+                    Task { @MainActor in self?.onPlaybackError?(message) }
+                }) { [weak self] in
                     Task { @MainActor in
                         self?.isSpeaking = false
                         print("[Speech] Remote audio playback finished")
@@ -317,7 +334,10 @@ class SpeechManager: NSObject, ObservableObject {
                 }
             } catch {
                 print("[Speech] Remote audio error: \(error)")
-                await MainActor.run { self.isSpeaking = false }
+                await MainActor.run {
+                    self.isSpeaking = false
+                    self.onPlaybackError?(error.localizedDescription)
+                }
                 completion()
             }
         }
