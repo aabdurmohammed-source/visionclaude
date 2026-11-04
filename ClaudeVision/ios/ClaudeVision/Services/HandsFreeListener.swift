@@ -29,6 +29,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
 
     @Published private(set) var phase: Phase = .stopped
     /// What the recognizer currently hears (shown on screen so you can see it working).
+    /// While armed and silent it shows a "listening" hint so you can tell it is on.
     @Published private(set) var heardText: String = ""
     var onCommand: ((String) -> Void)?
 
@@ -38,7 +39,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private var currentRequest: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var engineRunning = false
-    private var configObserver: NSObjectProtocol?
+    private var configObserver: NSObject?
 
     private var rollTimer: Timer?
     private var silenceTimer: Timer?
@@ -47,6 +48,8 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private var errorStreak = 0
     private var capturedCommand = ""
     private var followUpUntil = Date.distantPast
+
+    private let armedHint = "Listening for \u{201C}hey claude\u{201D}\u{2026}"
 
     private let pauseThreshold: TimeInterval = 1.6
     private let wakePhrases = ["hey claude", "okay claude", "ok claude", "hi claude",
@@ -85,6 +88,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
             try startEngine()
         } catch {
             print("[HandsFree] engine start failed: \(error) - retrying")
+            heardText = "Mic not ready - retrying\u{2026}"
             scheduleRestart(after: 2.0, forceActivate: true)
             return
         }
@@ -136,7 +140,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in self?.handleConfigChange() }
-            }
+            } as? NSObject
         }
     }
 
@@ -186,8 +190,9 @@ final class HandsFreeListener: NSObject, ObservableObject {
     private func beginRecognition() {
         guard phase == .waiting || phase == .capturing else { return }
         endRecognition()
-        heardText = ""
+        heardText = (phase == .waiting) ? armedHint : ""
         guard let recognizer, recognizer.isAvailable else {
+            heardText = "Speech recognizer unavailable - retrying\u{2026}"
             scheduleRestart(after: 2.0)
             return
         }
@@ -248,7 +253,7 @@ final class HandsFreeListener: NSObject, ObservableObject {
         guard let text else { return }
         errorStreak = 0
         let norm = HandsFreeListener.normalize(text)
-        if phase == .waiting || phase == .capturing { heardText = text }
+        if (phase == .waiting || phase == .capturing) && !norm.isEmpty { heardText = text }
 
         switch phase {
         case .waiting:
