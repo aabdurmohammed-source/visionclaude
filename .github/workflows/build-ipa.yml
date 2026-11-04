@@ -1,0 +1,39 @@
+name: build-unsigned-ipa
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-26   # VisionClaude's project.yml asks for Xcode 26; change to macos-15 if the runner image is missing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ClaudeVision/ios
+        run: xcodegen generate
+
+      - name: Build (no signing)
+        working-directory: ClaudeVision/ios
+        run: |
+          xcodebuild -project ClaudeVision.xcodeproj -scheme ClaudeVision \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        working-directory: ClaudeVision/ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ClaudeVision.app Payload/
+          zip -qr ClaudeVision-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeVision-unsigned-ipa
+          path: ClaudeVision/ios/ClaudeVision-unsigned.ipa
