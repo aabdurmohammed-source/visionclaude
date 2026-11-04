@@ -38,8 +38,8 @@ class SessionViewModel: ObservableObject {
         }
     }
 
-    // Frame sources
-    @Published var activeFrameSource: FrameSourceType = .iPhone {
+    // Frame sources: the Meta glasses are the default; the phone camera only starts if you pick it in Settings.
+    @Published var activeFrameSource: FrameSourceType = .rayBan {
         didSet { switchFrameSource() }
     }
     @Published var frameSourceStatus: FrameSourceStatus = .disconnected
